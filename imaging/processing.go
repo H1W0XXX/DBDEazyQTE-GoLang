@@ -1,138 +1,110 @@
-// imaging/imaging.go
-//
-// 说明：
-//  1. 只在 Init 时分配中间 Mat，后续帧全部复用，避免 GC/Cgo 抖动；
-//  2. FindRed 直接 InRange + 圆形掩码，一步得到最终二值图；
-//  3. FindSquare 只阈值一次，再 DistanceTransform；
-//  4. DistanceTransform 只要 dist，不再申请 labels；
-//  5. 依赖 gocv v0.32+。
+// imaging/processing.go
 package imaging
 
 import (
-	//"errors"
 	"image"
-	"image/color"
 	"math"
-	"sync"
 
 	"gocv.io/x/gocv"
 )
 
-var (
-	once         sync.Once
-	circleMask   gocv.Mat // 截图尺寸固定后生成
-	tmpMask      gocv.Mat // 所有中间单通道图在此复用
-	tmpDist      gocv.Mat // DistanceTransform 输出
-	cropH, cropW int
-
-	inited bool
-)
-
-// Init 在程序启动后、第一次截图前调用。
-// crop 为你的截图框宽高（一般正方形 200×200 / 250×250 …）。
-func Init(crop int) {
-	once.Do(func() {
-		cropH, cropW = crop, crop
-
-		// 圆形掩码：用来限制红点搜索范围
-		circleMask = gocv.NewMatWithSize(cropH, cropW, gocv.MatTypeCV8U)
-		gocv.Circle(
-			&circleMask,
-			image.Pt(cropW/2, cropH/2),
-			cropH/2,
-			color.RGBA{255, 255, 255, 0}, // ←★ 这里改成 RGBA
-			-1,
-		)
-
-		// 复用的临时 Mat
-		tmpMask = gocv.NewMatWithSize(cropH, cropW, gocv.MatTypeCV8U)
-		tmpDist = gocv.NewMatWithSize(cropH, cropW, gocv.MatTypeCV32F)
-
-		inited = true
-	})
+// Init initializes the imaging package. Currently a no-op.
+func Init(_ int) {
+	// no-op, accepts an integer for compatibility with main
 }
 
-// ------- 公共工具 -------
+// findThickestPoint performs a distance transform on a binary 8‑bit mask
+// and returns the farthest point and its radius.
+func findThickestPoint(bin gocv.Mat) (pt image.Point, radius int) {
+	// Guard: must be non-empty, 8‑bit single channel
+	if bin.Empty() || bin.Type() != gocv.MatTypeCV8U {
+		return image.Point{}, 0
+	}
 
-func colorScalar(v float64) gocv.Scalar { return gocv.NewScalar(v, v, v, 0) }
+	dist := gocv.NewMat()
+	labels := gocv.NewMat()
+	defer dist.Close()
+	defer labels.Close()
 
-// findThickestPoint: 在 tmpDist 上取 maxLoc
-func findThickestPoint(bin *gocv.Mat) (pt image.Point, radius int) {
-	gocv.DistanceTransform(*bin, &tmpDist, nil,
-		gocv.DistC, 3, 0)
-	_, maxVal, _, maxLoc := gocv.MinMaxLoc(tmpDist)
+	// DistanceTransform(src, dst, labels, distType, maskSize, labelType)
+	gocv.DistanceTransform(bin, &dist, &labels, gocv.DistC, 3, 0)
+
+	_, maxVal, _, maxLoc := gocv.MinMaxLoc(dist)
 	return maxLoc, int(maxVal)
 }
 
-// ------- API 1: FindRed -------
-// redThresh 一般用 180
-func FindRed(src gocv.Mat, redThresh uint8) (image.Point, int, bool) {
-	if !inited {
-		panic("imaging.Init(...) 未调用")
-	}
-	// 1) 直接 InRange 得到红色区域
+// FindRed thresholds BGR for red pixels, applies a circular mask, and finds the thickest point.
+// Returns center point, radius, and ok=true if found.
+func FindRed(src gocv.Mat, redThresh uint8) (pt image.Point, radius int, ok bool) {
+	// 1) Raw threshold: B<20, G<20, R>redThresh
+	mask := gocv.NewMat()
+	defer mask.Close()
+
 	lower := gocv.NewScalar(0, 0, float64(redThresh), 0)
 	upper := gocv.NewScalar(20, 20, 255, 0)
-	gocv.InRangeWithScalar(src, lower, upper, &tmpMask)
+	gocv.InRangeWithScalar(src, lower, upper, &mask)
 
-	// 2) 与圆形掩码相交
-	gocv.BitwiseAnd(tmpMask, circleMask, &tmpMask)
-
-	if gocv.CountNonZero(tmpMask) == 0 {
+	// 2) No red pixels → bail
+	if mask.Empty() || gocv.CountNonZero(mask) == 0 {
 		return image.Point{}, 0, false
 	}
-	pt, r := findThickestPoint(&tmpMask)
-	if r < 1 {
+
+	// 3) Ensure single-channel 8‑bit
+	if mask.Type() != gocv.MatTypeCV8U {
+		gray := gocv.NewMat()
+		defer gray.Close()
+		gocv.CvtColor(mask, &gray, gocv.ColorBGRToGray)
+		mask.Close()
+		mask = gray
+	}
+
+	// 4) Distance transform → thickest point
+	pt, radius = findThickestPoint(mask)
+	if radius < 1 {
 		return image.Point{}, 0, false
 	}
-	return pt, r, true
+	return pt, radius, true
 }
 
-// ------- API 2: FindSquare -------
-// 返回：白块圆心、前缘点、后缘点
-func FindSquare(src gocv.Mat) (image.Point, image.Point, image.Point, bool) {
-	if !inited {
-		panic("imaging.Init(...) 未调用")
-	}
+// FindSquare detects pure-white pixels, finds the thickest cluster, and returns
+// the mid-point between its two extreme edge points.
+func FindSquare(src gocv.Mat) (newPt, prePt, postPt image.Point, ok bool) {
+	h, w := src.Rows(), src.Cols()
+	mask := gocv.NewMat()
+	defer mask.Close()
 
-	// 1) 阈值纯白
-	gocv.InRangeWithScalar(src, colorScalar(255), colorScalar(255), &tmpMask)
-	if gocv.CountNonZero(tmpMask) == 0 {
+	// Threshold for pure white (255,255,255)
+	lower := gocv.NewScalar(255, 255, 255, 0)
+	upper := gocv.NewScalar(255, 255, 255, 0)
+	gocv.InRangeWithScalar(src, lower, upper, &mask)
+	if mask.Empty() || gocv.CountNonZero(mask) == 0 {
 		return image.Point{}, image.Point{}, image.Point{}, false
 	}
 
-	// 2) DistanceTransform
-	center, rad := findThickestPoint(&tmpMask)
+	// Binary mask → distance transform
+	bin := gocv.NewMat()
+	defer bin.Close()
+	gocv.Threshold(mask, &bin, 1, 255, gocv.ThresholdBinary)
+
+	center, rad := findThickestPoint(bin)
 	if rad < 1 {
 		return image.Point{}, image.Point{}, image.Point{}, false
 	}
 
-	// 3) 计算 pre / post
-	dx := float64(center.X - cropW/2)
-	dy := float64(center.Y - cropH/2)
+	// Compute extreme points along the radius
+	dx := float64(center.X - w/2)
+	dy := float64(center.Y - h/2)
 	angle := math.Atan2(dy, dx) + math.Pi
 	sin, cos := math.Sin(angle), math.Cos(angle)
 
-	pre := image.Pt(
+	prePt = image.Pt(
 		int(math.Round(float64(center.X)-sin*float64(rad))),
 		int(math.Round(float64(center.Y)-cos*float64(rad))),
 	)
-	post := image.Pt(
+	postPt = image.Pt(
 		int(math.Round(float64(center.X)+sin*float64(rad))),
 		int(math.Round(float64(center.Y)+cos*float64(rad))),
 	)
-	mid := image.Pt((pre.X+post.X)/2, (pre.Y+post.Y)/2)
-	return mid, pre, post, true
-}
-
-// ------- 资源释放，可选 -------
-
-func Close() {
-	if !inited {
-		return
-	}
-	circleMask.Close()
-	tmpMask.Close()
-	tmpDist.Close()
-	inited = false
+	newPt = image.Pt((prePt.X+postPt.X)/2, (prePt.Y+postPt.Y)/2)
+	return newPt, prePt, postPt, true
 }
