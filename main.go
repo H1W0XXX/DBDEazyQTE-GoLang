@@ -1,14 +1,10 @@
 // main.go
-// 本项目是对 En73r/DBDEazyQTE (https://github.com/En73r/DBDEazyQTE) 的重写。
+// 本项目还原“固定速率模型”，并加上“+/-键调节延迟”功能。
+// 只在外面 NewMat，一次分配，循环里用 CaptureRegionLeftInto 覆盖。
 package main
 
 import (
-	"fmt"
-	"image"
-	//"image/color"
 	"math"
-	//"path/filepath"
-	"runtime"
 	"syscall"
 	"time"
 
@@ -24,37 +20,28 @@ const (
 	repairSpeed = 330.0
 	healSpeed   = 300.0
 	wiggleSpeed = 230.0
+	redThresh   = 180
+
+	pressAndReleaseDelay = 0.003206 // 约 3.2 ms
+	delayDegreeOffset    = 0.0      // 视你调试再填正负
 )
 
-func dumpDisplays() { /* ... 保持不变 ... */ }
-
 func init() {
-	// timeBeginPeriod(1)
+	// 提高系统定时器精度到 1ms
 	syscall.NewLazyDLL("winmm.dll").NewProc("timeBeginPeriod").Call(1)
-	// 优先级
+	// 提升进程优先级到 HIGH
 	k32 := syscall.NewLazyDLL("kernel32.dll")
 	h, _, _ := k32.NewProc("GetCurrentProcess").Call()
-	const HIGH = 0x00000080
-	k32.NewProc("SetPriorityClass").Call(h, HIGH)
-	// 得到逻辑 CPU 数
-	numCPU := runtime.NumCPU()
-	// 只保留最高位那一颗
-	// 比如 numCPU=8, mask = 1<<(8-1) = 0x80
-	mask := uintptr(1 << (numCPU - 1))
-
-	setAffinity := k32.NewProc("SetProcessAffinityMask")
-	// 第一个参数是进程句柄，第二个参数是亲和性掩码
-	setAffinity.Call(h, mask)
-
+	k32.NewProc("SetPriorityClass").Call(h, uintptr(0x00000080))
 }
 
-func dumpFrame(mat gocv.Mat, ptRed, ptWhite image.Point, tag string) { /* ... */ }
-
 func main() {
-	imaging.Init(200)
+	// 启动按键钩子，默认开且模式为 Repair
 	input.StartHook()
+	input.Toggle = true
 	input.SpeedMode = 3
-	// 选最左显示器、算截图区域
+
+	// 选最左显示器，算截图区域中心
 	leftID, minX := 0, screenshot.GetDisplayBounds(0).Min.X
 	for i := 1; i < screenshot.NumActiveDisplays(); i++ {
 		b := screenshot.GetDisplayBounds(i)
@@ -67,70 +54,48 @@ func main() {
 	baseX := b.Min.X + (b.Dx()-crop)/2
 	baseY := b.Min.Y + (b.Dy()-crop)/2
 
-	//baseY := b.Min.Y + (b.Dy()-crop)/2 - 20
+	// **一次性**分配 Mat，循环内复用
+	mat := gocv.NewMat()
+	defer mat.Close()
 
+	// 主循环 120 FPS
 	ticker := time.NewTicker(time.Second / 120)
 	defer ticker.Stop()
-	var focusLevel float64
 
 	for t0 := range ticker.C {
 		if !input.Toggle {
 			continue
 		}
 
-		mat, err := capture.CaptureRegionLeft(baseX, baseY, crop, crop)
-		if err != nil {
+		// 截图到 mat（复用同一块内存）
+		if err := capture.CaptureRegionLeftInto(&mat, baseX, baseY, crop, crop); err != nil {
 			continue
 		}
 
-		// 红点
-		ptRed, _, ok := imaging.FindRed(mat, 180)
-		if !ok {
-			mat.Close()
-			continue
-		}
-		// 白框
-		ptWhite, _, _, ok := imaging.FindSquare(mat)
-		if !ok {
-			mat.Close()
+		// 先检测白框
+		ptW, _, _, okW := imaging.FindSquare(mat)
+		if !okW {
 			continue
 		}
 
-		// 计算角度差
-		degRed := util.CalDegree(
-			float64(ptRed.X-crop/2),
-			float64(ptRed.Y-crop/2),
+		// 再检测红点
+		ptR, _, okR := imaging.FindRed(mat, redThresh)
+		if !okR {
+			continue
+		}
+
+		// 计算从红点到白框的最短角度差
+		degR := util.CalDegree(
+			float64(ptR.X-crop/2),
+			float64(ptR.Y-crop/2),
 		)
-
-		// ----- 新增：测第二帧角度，判断方向 -----
-		time.Sleep(10 * time.Millisecond)
-		mat2, err2 := capture.CaptureRegionLeft(baseX, baseY, crop, crop)
-		if err2 != nil {
-			mat.Close()
-			continue
-		}
-		ptRed2, _, ok2 := imaging.FindRed(mat2, 180)
-		mat2.Close()
-		direction := 1
-		if ok2 {
-			deg2 := util.CalDegree(
-				float64(ptRed2.X-crop/2),
-				float64(ptRed2.Y-crop/2),
-			)
-			if math.Mod(deg2-degRed+360, 360) > 180 {
-				direction = -1
-			}
-		}
-		fmt.Printf("方向：%s\n", map[int]string{1: "顺时针", -1: "逆时针"}[direction])
-
-		// 原来的角度差，用 direction 修正符号
-		degWhite := util.CalDegree(
-			float64(ptWhite.X-crop/2),
-			float64(ptWhite.Y-crop/2),
+		degW := util.CalDegree(
+			float64(ptW.X-crop/2),
+			float64(ptW.Y-crop/2),
 		)
-		delta := math.Mod(float64(direction)*(degWhite-degRed)+360.0, 360.0)
+		delta := math.Mod(degW-degR+360.0, 360.0)
 
-		// 选速度
+		// 选择固定速度
 		var speed float64
 		switch input.SpeedMode {
 		case 3:
@@ -143,24 +108,19 @@ func main() {
 			speed = wiggleSpeed
 		}
 		if input.HyperFocus {
-			speed *= 1 + 0.04*focusLevel
+			speed *= 1.04
 		}
 
+		// 计算精准点击时刻，加上 +/- 键调节的偏移
 		waitSec := delta / speed
-		clickTime := t0.Add(time.Duration(waitSec * float64(time.Second)))
+		// 从 t0 开始加上预测时间，再减去硬件延迟，同时加上一个按度数的补偿
+		clickTime := t0.
+			Add(time.Duration(waitSec * float64(time.Second))).
+			Add(-time.Duration(pressAndReleaseDelay * float64(time.Second))).
+			Add(time.Duration((delayDegreeOffset / speed) * float64(time.Second)))
 
-		// —— 加入调试输出 ——
-		//fmt.Printf("DEBUG: delta=%.2f°, speed=%.1f°/s, wait=%.3fs, clickTime=%s, now=%s\n",
-		//	delta, speed, waitSec,
-		//	clickTime.Format("15:04:05.000"), time.Now().Format("15:04:05.000"),
-		//)
-
+		// Busy‑wait 到时刻按空格
 		util.SleepUntil(clickTime)
-
-		//fmt.Println("DEBUG: woke up @", time.Now().Format("15:04:05.000"))
-		//fmt.Println("DEBUG: calling SendSpace()")
 		util.SendSpace()
-
-		mat.Close()
 	}
 }

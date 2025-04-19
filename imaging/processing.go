@@ -3,6 +3,7 @@ package imaging
 
 import (
 	"image"
+	"image/color"
 	"math"
 
 	"gocv.io/x/gocv"
@@ -36,29 +37,48 @@ func findThickestPoint(bin gocv.Mat) (pt image.Point, radius int) {
 // FindRed thresholds BGR for red pixels, applies a circular mask, and finds the thickest point.
 // Returns center point, radius, and ok=true if found.
 func FindRed(src gocv.Mat, redThresh uint8) (pt image.Point, radius int, ok bool) {
-	// 1) Raw threshold: B<20, G<20, R>redThresh
+	// 1) 拆通道
+	chans := gocv.Split(src)
+	defer func() {
+		for _, m := range chans {
+			m.Close()
+		}
+	}()
+	b, g, r := chans[0], chans[1], chans[2]
+
+	// 2) 分别阈值
+	rMask := gocv.NewMat()
+	defer rMask.Close()
+	gocv.Threshold(r, &rMask, float32(redThresh), 255, gocv.ThresholdBinary)
+
+	gMask := gocv.NewMat()
+	defer gMask.Close()
+	gocv.Threshold(g, &gMask, 20, 255, gocv.ThresholdBinaryInv)
+
+	bMask := gocv.NewMat()
+	defer bMask.Close()
+	gocv.Threshold(b, &bMask, 20, 255, gocv.ThresholdBinaryInv)
+
+	// 3) 合并三张掩码
 	mask := gocv.NewMat()
 	defer mask.Close()
+	gocv.BitwiseAnd(rMask, gMask, &mask)
+	gocv.BitwiseAnd(mask, bMask, &mask)
 
-	lower := gocv.NewScalar(0, 0, float64(redThresh), 0)
-	upper := gocv.NewScalar(20, 20, 255, 0)
-	gocv.InRangeWithScalar(src, lower, upper, &mask)
+	// 4) 圆形区域掩码
+	h, w := mask.Rows(), mask.Cols()
+	circle := gocv.NewMatWithSize(h, w, gocv.MatTypeCV8U)
+	defer circle.Close()
+	// 在中心画个半径 h/2 的白色实心圆
+	gocv.Circle(&circle, image.Pt(w/2, h/2), h/2, color.RGBA{255, 255, 255, 0}, -1)
+	gocv.BitwiseAnd(mask, circle, &mask)
 
-	// 2) No red pixels → bail
+	// 5) 如果没有红点，直接返回
 	if mask.Empty() || gocv.CountNonZero(mask) == 0 {
 		return image.Point{}, 0, false
 	}
 
-	// 3) Ensure single-channel 8‑bit
-	if mask.Type() != gocv.MatTypeCV8U {
-		gray := gocv.NewMat()
-		defer gray.Close()
-		gocv.CvtColor(mask, &gray, gocv.ColorBGRToGray)
-		mask.Close()
-		mask = gray
-	}
-
-	// 4) Distance transform → thickest point
+	// 6) 距离变换找到最粗红点
 	pt, radius = findThickestPoint(mask)
 	if radius < 1 {
 		return image.Point{}, 0, false

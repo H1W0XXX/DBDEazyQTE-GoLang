@@ -43,7 +43,7 @@ func SendSpace() {
 		log.Println("SendSpace keydown error:", err)
 	}
 	// 保证按下被系统处理
-	time.Sleep(10 * time.Millisecond)
+	time.Sleep(5 * time.Millisecond)
 	// 松开
 	_, _, err = procKeybdEvent.Call(
 		uintptr(VK_SPACE),
