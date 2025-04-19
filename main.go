@@ -51,6 +51,7 @@ func init() {
 func dumpFrame(mat gocv.Mat, ptRed, ptWhite image.Point, tag string) { /* ... */ }
 
 func main() {
+	imaging.Init(200)
 	input.StartHook()
 	input.SpeedMode = 3
 	// 选最左显示器、算截图区域
