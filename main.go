@@ -1,6 +1,9 @@
 // main.go
+// MINGW64
+// go build -tags customenv,dxgi -o /z/go-qte.exe
 // 本项目还原“固定速率模型”，并加上“+/-键调节延迟”功能。
 // 只在外面 NewMat，一次分配，循环里用 CaptureRegionLeftInto 覆盖。
+
 package main
 
 import (

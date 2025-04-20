@@ -1,16 +1,18 @@
-_H='log.png'
-_G='space!!'
-_F='predict time'
-_E='height'
-_D='space'
+_G='log.png'
+_F='space!!'
+_E='predict time'
+_D='height'
 _C='\nspeed:'
 _B=False
 _A=True
 import keyboard,pyautogui,time,win32gui,win32ui,win32con,threading,numpy as np
 from PIL import Image
-import winsound,math,psutil,mss
+import winsound,math,psutil,mss,ctypes
 from ctypes import windll
+from ctypes import wintypes
 import cv2,math
+if ctypes.sizeof(ctypes.c_void_p)==ctypes.sizeof(ctypes.c_ulonglong):ULONG_PTR=ctypes.c_ulonglong
+else:ULONG_PTR=ctypes.c_ulong
 imgdir='DBDimg/'
 delay_degree=0
 crop_w,crop_h=200,200
@@ -32,6 +34,14 @@ red_sensitive=180
 focus_level=0
 _sct=mss.mss()
 windll.winmm.timeBeginPeriod(1)
+SendInput=ctypes.windll.user32.SendInput
+KEYEVENTF_SCANCODE=8
+KEYEVENTF_KEYUP=2
+SCAN_SPACE=57
+class KEYBDINPUT(ctypes.Structure):_fields_=[('wVk',wintypes.WORD),('wScan',wintypes.WORD),('dwFlags',wintypes.DWORD),('time',wintypes.DWORD),('dwExtraInfo',ULONG_PTR)]
+class _INPUTunion(ctypes.Union):_fields_=[('ki',KEYBDINPUT)]
+class INPUT(ctypes.Structure):_anonymous_='u',;_fields_=[('type',wintypes.DWORD),('u',_INPUTunion)]
+def send_space():windll.user32.keybd_event(win32con.VK_SPACE,0,0,0);windll.user32.keybd_event(win32con.VK_SPACE,0,win32con.KEYEVENTF_KEYUP,0)
 def sleep(t):
 	st=time.time()
 	while _A:
@@ -41,7 +51,7 @@ def sleep_to(time_stamp):
 	while _A:
 		offset=time.time()-time_stamp
 		if offset>=0:break
-def win_screenshot(startw,starth,w,h):shot=_sct.grab({'left':startw,'top':starth,'width':w,_E:h});img=np.asarray(shot)[:,:,:3];return img[:,:,::-1]
+def win_screenshot(startw,starth,w,h):shot=_sct.grab({'left':startw,'top':starth,'width':w,_D:h});img=np.asarray(shot)[:,:,:3];return img[:,:,::-1]
 def find_red(im_array):
 	h,w,_=im_array.shape;r=im_array[:,:,0];g=im_array[:,:,1];b=im_array[:,:,2];mask=(r>red_sensitive)&(g<20)&(b<20)
 	if not mask.any():return
@@ -89,9 +99,9 @@ def find_square(im_array):
 	if list(im_array[new_white[0]][new_white[1]])!=[0,0,255]:print('new white error');return
 	return new_white,pre_white,post_white
 def wiggle(t1,deg1,direction,im1):
-	speed=wiggle_speed*direction;target1=270;target2=90;delta_deg1=(target1-deg1)%(direction*360);delta_deg2=(target2-deg1)%(direction*360);predict_time=min(delta_deg1/speed,delta_deg2/speed);print(_F,predict_time);click_time=t1+predict_time-press_and_release_delay+delay_degree/abs(speed);delta_t=click_time-time.time()
-	if delta_t<0 and delta_t>-.1:keyboard.press_and_release(_D);print('quick space!!',delta_t,_C,speed);sleep(.13);return
-	try:delta_t=click_time-time.time();sleep(delta_t);keyboard.press_and_release(_D);print(_G,delta_t,_C,speed);Image.fromarray(im1).save(imgdir+_H);sleep(.13)
+	speed=wiggle_speed*direction;target1=270;target2=90;delta_deg1=(target1-deg1)%(direction*360);delta_deg2=(target2-deg1)%(direction*360);predict_time=min(delta_deg1/speed,delta_deg2/speed);print(_E,predict_time);click_time=t1+predict_time-press_and_release_delay+delay_degree/abs(speed);delta_t=click_time-time.time()
+	if delta_t<0 and delta_t>-.1:send_space();print('quick space!!',delta_t,_C,speed);sleep(.13);return
+	try:delta_t=click_time-time.time();sleep(delta_t);send_space();print(_F,delta_t,_C,speed);Image.fromarray(im1).save(imgdir+_G);sleep(.13)
 	except ValueError as e:print(e,delta_t,deg1,delta_deg1,delta_deg2)
 def timer(im1,t1):
 	B='focus hit:';A='_';global focus_level
@@ -111,7 +121,7 @@ def timer(im1,t1):
 	if not white:return
 	print(white);white,pre_white,post_white=white
 	if direction<0:pre_white,post_white=post_white,pre_white
-	im1[r1[0]][r1[1]]=[0,255,0];im1[white[0]][white[1]]=[0,255,0];last_im_a=im1;print('targeting_time:',time.time()-t1);print('speed:',speed);target=cal_degree(white[0]-crop_h/2,white[1]-crop_w/2);delta_deg=(target-deg1)%(direction*360);print(_F,delta_deg/speed);click_time=t1+delta_deg/speed-press_and_release_delay+delay_degree/abs(speed);delta_t=click_time-time.time();max_d=r1[2];global delay_pixel;start_point=post_white;sin=math.sin(2*math.pi*target/360);cos=math.cos(2*math.pi*target/360);max_d+=delay_pixel;delta_i=pre_white[0]-white[0];delta_j=pre_white[1]-white[1];end_point=[white[0]+round(delta_i-direction*sin*-max_d),white[1]+round(delta_j-direction*cos*-max_d)];check_points=[]
+	im1[r1[0]][r1[1]]=[0,255,0];im1[white[0]][white[1]]=[0,255,0];last_im_a=im1;print('targeting_time:',time.time()-t1);print('speed:',speed);target=cal_degree(white[0]-crop_h/2,white[1]-crop_w/2);delta_deg=(target-deg1)%(direction*360);print(_E,delta_deg/speed);click_time=t1+delta_deg/speed-press_and_release_delay+delay_degree/abs(speed);delta_t=click_time-time.time();max_d=r1[2];global delay_pixel;start_point=post_white;sin=math.sin(2*math.pi*target/360);cos=math.cos(2*math.pi*target/360);max_d+=delay_pixel;delta_i=pre_white[0]-white[0];delta_j=pre_white[1]-white[1];end_point=[white[0]+round(delta_i-direction*sin*-max_d),white[1]+round(delta_j-direction*cos*-max_d)];check_points=[]
 	if abs(end_point[0]-start_point[0])<abs(end_point[1]-start_point[1]):
 		for j in range(start_point[1],end_point[1],2*np.sign(end_point[1]-start_point[1])):i=start_point[0]+(end_point[0]-start_point[0])/(end_point[1]-start_point[1])*(j-start_point[1]);i=round(i);check_points.append((i,j))
 	elif np.sign(end_point[0]-start_point[0])==0:return
@@ -129,7 +139,7 @@ def timer(im1,t1):
 	else:print('[!]large white area detected');check_points.pop()
 	print('pre 4 deg check points',pre_4deg_check_points);print('delta_t',delta_t)
 	if delta_t<0 and delta_t>-.1:
-		keyboard.press_and_release(_D);print('[!]quick space!!',delta_t,_C,speed)
+		send_space();print('[!]quick space!!',delta_t,_C,speed)
 		if hyperfocus:print(B,focus_level);focus_level=(focus_level+1)%7
 		return
 	try:
@@ -149,9 +159,9 @@ def timer(im1,t1):
 			if time.time()>click_time+.04:print('catch time out');break
 			im_array_pre_backup=im_array_pre
 		if type(im_array_pre_backup)==type(None):return
-		keyboard.press_and_release(_D);print('checktime',checkwhen)
+		send_space();print('checktime',checkwhen)
 		if checks_after_awake<=1:print('[!]awake quick space!!',delta_t,_C,speed);file_name='awake'
-		else:print(_G,delta_t,_C,speed);file_name=''
+		else:print(_F,delta_t,_C,speed);file_name=''
 		print(im_array_pre[pre_white[0],pre_white[1]]);r3=find_red(im_array_pre);shape=im_array_pre_backup.shape
 		for i in range(shape[0]):
 			for j in range(shape[1]):
@@ -168,9 +178,9 @@ def timer(im1,t1):
 		else:file_name+='log_'+str(real_delta_deg)+A+str(int(time.time()))
 		file_name+='speed_'+str(speed)+'.png';file_name=imgdir+file_name;Image.fromarray(im_array_pre).save(file_name)
 		if hyperfocus:print(B,focus_level);focus_level=min(6,focus_level+1)
-	except ValueError as e:Image.fromarray(im1).save(imgdir+_H);print(e,delta_t,deg1,deg2,target)
+	except ValueError as e:Image.fromarray(im1).save(imgdir+_G);print(e,delta_t,deg1,deg2,target)
 def driver():
-	global crop_w,crop_h,region;mon=_sct.monitors[1];screen_w,screen_h=mon['width'],mon[_E]
+	global crop_w,crop_h,region;mon=_sct.monitors[1];screen_w,screen_h=mon['width'],mon[_D]
 	if screen_h==1600:crop_w=crop_h=250
 	elif screen_h==1080:crop_w=crop_h=150
 	elif screen_h==2160:crop_w=crop_h=330
