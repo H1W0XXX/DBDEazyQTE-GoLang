@@ -1,0 +1,8 @@
+# 忽略 JetBrains IDE 的工程配置
+.idea/
+
+# 忽略所有 Python 源码
+*.py
+
+# 忽略编译生成的 Windows 可执行文件
+*.exe
