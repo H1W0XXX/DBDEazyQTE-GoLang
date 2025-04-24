@@ -43,6 +43,20 @@ red_sensitive=180
 focus_level=0
 use_win32 = True
 
+LOGPIXELSX = 88
+
+user32 = ctypes.windll.user32
+gdi32  = ctypes.windll.gdi32
+
+# 拿主屏的 DC
+hdc = user32.GetDC(0)
+dpi = gdi32.GetDeviceCaps(hdc, LOGPIXELSX)  # 例如 144 表示 150% 缩放
+user32.ReleaseDC(0, hdc)
+
+# 计算缩放因子
+scale_factor = dpi / 96.0
+
+
 _sct = mss.mss()                                 
 # 开启高精度计时器，让 mss DXGI 路径延迟更稳
 windll.winmm.timeBeginPeriod(1)
@@ -155,14 +169,20 @@ def sleep_to(time_stamp):
 
 def win_screenshot(startw: int, starth: int, w: int, h: int) -> np.ndarray:
     """
-    Faster screen‑grab using mss (DXGI).  Returns RGB numpy array (h, w, 3).
-    其余代码无须改动。
+    直接用 mss.grab 按照绝对桌面坐标抓 region，
+    返回一个 (h, w, 3) 的 RGB ndarray，完全不做插值、不管 DPI。
     """
-    # mss.grab() 接受区域 dict，结果是 BGRA bytes
-    shot = _sct.grab({"left": startw, "top": starth, "width": w, "height": h})
-    img = np.asarray(shot)[:, :, :3]              # BGRA → BGR
-    return img[:, :, ::-1]                       # BGR → RGB 与旧版一致
-    
+    # 构造一个字典给 mss.grab，用你算好的绝对坐标
+    region = {
+        "left":   startw,
+        "top":    starth-20,
+        "width":  w,
+        "height": h,
+    }
+    shot = _sct.grab(region)                           # BGRA
+    arr  = np.asarray(shot)[:, :, :3]                  # 取前 3 通道 BGR
+    return arr[:, :, ::-1]                             # BGR→RGB
+
 
 
 def find_red(im_array):
@@ -618,46 +638,60 @@ def timer(im1, t1):
 
     # TODO: if white in im2
 
+def win_screenshot_phys(region, crop_w, crop_h):
+    """
+    用物理像素坐标抓图，然后缩回 crop_w×crop_h 逻辑像素。
+    region: dict with left/top/width/height（都是物理像素）
+    """
+    shot = _sct.grab(region)                          # 大小 = (phys_h, phys_w)
+    arr  = np.asarray(shot)[:, :, :3][:, :, ::-1]     # BGRA→RGB
+    # 缩回到 (crop_w, crop_h)
+
+    return cv2.resize(arr, (crop_w, crop_h), interpolation=cv2.INTER_NEAREST)
 
 
 def driver():
-    """
-    用 mss 获取屏幕分辨率 → 计算截屏区域 → 循环读取 win_screenshot
-    其它逻辑（timer / 键盘等）完全不变。
-    """
     global crop_w, crop_h, region
 
-    # 1. 取主显示器宽高
-    # mon = _sct.monitors[1]               # monitor[0] = 全屏区域
-    
-    mon_list = _sct.monitors[1:]
-    mon = next(m for m in mon_list if m['left'] == 0 and m['top'] == 0)
-    screen_w, screen_h = mon["width"], mon["height"]
-    # 2. 根据高度判定 SkillCheck 圆尺寸
-    if screen_h == 1600:         # 2560×1600
-        crop_w = crop_h = 250
-    elif screen_h == 1080:       # 1920×1080
-        crop_w = crop_h = 150
-    elif screen_h == 2160:       # 3840×2160
-        crop_w = crop_h = 330
-    else:                        # 其它分辨率自行设默认
-        crop_w = crop_h = 200
+    # 1. 取所有物理屏列表（跳过 monitors[0]）
+    mons = _sct.monitors[1:]
+    # 2. 找主屏（left==0 且 top>=0）
+    mon = next(m for m in mons if m['left']==0 and m['top']>=0)
 
-    # 3. 计算屏幕中央区域 [x, y, w, h]
+    # 3. 按屏高决定 crop 大小
+    screen_h = mon["height"]
+    if   screen_h == 1600: crop_w = crop_h = 250
+    elif screen_h == 1080: crop_w = crop_h = 150
+    elif screen_h == 2160: crop_w = crop_h = 330
+    else:    crop_w = crop_h = 200
+
+    # 4. 先算“逻辑像素”中心
+    logical_left = mon['left'] + (mon['width']  - crop_w)//2
+    logical_top  = mon['top']  + (mon['height'] - crop_h)//2
+    # 5. 把逻辑像素映射到物理像素
+    # phys_left = int(logical_left * scale_factor)
+    # phys_top  = int(logical_top  * scale_factor)
+    # phys_w    = int(crop_w        * scale_factor)
+    # phys_h    = int(crop_h        * scale_factor)
+
+    # 6. 构造给 mss 的物理像素区域
     region = [
-        mon['left'] + (mon['width'] - crop_w) // 2,
-        mon['top'] + (mon['height'] - crop_h) // 2,
-        crop_w,
-        crop_h,
+        logical_left, logical_top,
+        crop_w, crop_h
     ]
 
-
+    try:
+        os.makedirs(imgdir, exist_ok=True)
+        im0 = win_screenshot(region[0], region[1], region[2], region[3])
+        Image.fromarray(im0).save(os.path.join(imgdir, 'startup_debug.png'))
+    except Exception as e:
+        print(f"[!] 调试截图保存失败：{e}")
 
     # 4. 主循环 —— 保持原逻辑
     try:
         while True:
             t0 = time.time()
-            im_array = win_screenshot(*region)   # ← 仍用优化后的函数
+            im_array = win_screenshot(region[0],region[1],crop_w, crop_h)   # ← 仍用优化后的函数
             timer(im_array, t0)
     except KeyboardInterrupt:
         Image.fromarray(last_im_a).save(imgdir + 'last_log.png')
