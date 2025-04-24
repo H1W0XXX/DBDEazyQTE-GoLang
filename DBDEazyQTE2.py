@@ -628,9 +628,11 @@ def driver():
     global crop_w, crop_h, region
 
     # 1. 取主显示器宽高
-    mon = _sct.monitors[1]               # monitor[0] = 全屏区域
+    # mon = _sct.monitors[1]               # monitor[0] = 全屏区域
+    
+    mon_list = _sct.monitors[1:]
+    mon = next(m for m in mon_list if m['left'] == 0 and m['top'] == 0)
     screen_w, screen_h = mon["width"], mon["height"]
-
     # 2. 根据高度判定 SkillCheck 圆尺寸
     if screen_h == 1600:         # 2560×1600
         crop_w = crop_h = 250
@@ -643,8 +645,8 @@ def driver():
 
     # 3. 计算屏幕中央区域 [x, y, w, h]
     region = [
-        (screen_w - crop_w) // 2,
-        (screen_h - crop_h) // 2,
+        mon['left'] + (mon['width'] - crop_w) // 2,
+        mon['top'] + (mon['height'] - crop_h) // 2,
         crop_w,
         crop_h,
     ]
