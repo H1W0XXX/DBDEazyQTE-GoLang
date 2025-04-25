@@ -57,7 +57,7 @@ user32.ReleaseDC(0, hdc)
 # 计算缩放因子
 scale_factor = dpi / 96.0
 
-cam = dxcam.create(output_idx=0, output_color="RGB", max_buffer_len=2)
+# cam = dxcam.create(output_idx=0, output_color="RGB", max_buffer_len=2)
 # cam.start(target_fps=120)
 
 _sct = mss.mss()
@@ -665,7 +665,7 @@ def win_screenshot_phys(region, crop_w, crop_h):
 
 
 def driver():
-    global crop_w, crop_h, region
+    global crop_w, crop_h, region ,cam
 
     # 1. 取所有物理屏列表（跳过 monitors[0]）
     mons = _sct.monitors[1:]
@@ -693,7 +693,7 @@ def driver():
     rx = lx + crop_w
     by = ly + crop_h
 
-    cam = dxcam.create(output_idx=0, output_color="RGB", max_buffer_len=1)
+    cam = dxcam.create(output_idx=0, output_color="RGB", max_buffer_len=2)
     cam.start(
         target_fps=frame_rate,
         region=(lx, ly, rx, by),
