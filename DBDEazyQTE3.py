@@ -30,7 +30,7 @@ region = [int((2560 - crop_w) / 2), int((1440 - crop_h) / 2),
           crop_w, crop_h]
 toggle = True
 keyboard_switch = True
-frame_rate = 30 # 录屏帧数
+frame_rate = 40 # 录屏帧数
 repair_speed = 330
 heal_speed = 300
 wiggle_speed = 230
@@ -202,7 +202,7 @@ def win_screenshot(_, __, ___, ____):
     img = cam.get_latest_frame()
     if img is None:
         # 如果实在没新帧，可以退而求其次返回最后一帧
-        img = cam.get_latest_frame(video_mode=True)
+        img = cam.get_latest_frame(video_mode=False)
         if img is None:
             raise RuntimeError("读不到帧了")
     return img
@@ -390,7 +390,7 @@ def wiggle(t1, deg1, direction, im1):
         sleep(delta_t)
         send_space()
         print('space!!', delta_t, '\nspeed:', speed)
-        Image.fromarray(im1).save(imgdir + 'log.png')
+        # Image.fromarray(im1).save(imgdir + 'log.png')
         sleep(0.13)
     except ValueError as e:
 
@@ -639,13 +639,13 @@ def timer(im1, t1):
             file_name += 'log_' + str(real_delta_deg) + '_' + str(int(time.time()))
         file_name += 'speed_' + str(speed) + '.png'
         file_name = imgdir + file_name
-        Image.fromarray(im_array_pre).save(file_name)
+        # Image.fromarray(im_array_pre).save(file_name)
         # sleep(0.3)
         if (hyperfocus):
             print('focus hit:', focus_level)
             focus_level = min(6, (focus_level + 1))
     except ValueError as e:
-        Image.fromarray(im1).save(imgdir + 'log.png')
+        # Image.fromarray(im1).save(imgdir + 'log.png')
         # winsound.Beep(230,300)
         print(e, delta_t, deg1, deg2, target)
 
@@ -693,11 +693,11 @@ def driver():
     rx = lx + crop_w
     by = ly + crop_h
 
-    cam = dxcam.create(output_idx=0, output_color="RGB", max_buffer_len=2)
+    cam = dxcam.create(output_idx=0, output_color="RGB", max_buffer_len=1)
     cam.start(
         target_fps=frame_rate,
         region=(lx, ly, rx, by),
-        video_mode=True
+        video_mode=False
     )
 
     # 6. 构造给 mss 的物理像素区域
@@ -720,7 +720,8 @@ def driver():
             im_array = win_screenshot(region[0], region[1], crop_w, crop_h)  # ← 仍用优化后的函数
             timer(im_array, t0)
     except KeyboardInterrupt:
-        Image.fromarray(last_im_a).save(imgdir + 'last_log.png')
+        pass
+        # Image.fromarray(last_im_a).save(imgdir + 'last_log.png')
 
 
 def cal_degree(x: float, y: float) -> float:
