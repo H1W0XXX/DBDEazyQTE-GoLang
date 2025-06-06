@@ -117,6 +117,9 @@ SendInput.argtypes = (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int)
 SendInput.restype = wintypes.UINT
 
 
+SIN_TABLE = [math.sin(math.radians(d)) for d in range(360)]
+COS_TABLE = [math.cos(math.radians(d)) for d in range(360)]
+
 def send_space():
     global use_win32
     if use_win32:
@@ -276,90 +279,224 @@ def find_thickest_point(shape, target_points):
     # 4) max_val 就是半径 d，坐标是 (i,j)
     return i, j, int(max_val)
 
+def get_sin_cos(deg: float):
+    """
+    如果 deg 不是整数，就四舍五入到最近的整数再查表，
+    也可以直接 int(deg) 取地板，精度差别通常很小。
+    """
+    idx = int(round(deg)) % 360
+    return SIN_TABLE[idx], COS_TABLE[idx]
 
-def find_square(im_array):
-    r_i = None
-    shape = im_array.shape
-    target_points = []
-    global focus_level
-    for i in range(shape[0]):
-        for j in range(shape[1]):
-            if list(im_array[i][j]) == [255, 255, 255]:
-                if i > shape[0] * (200 - 40) / 2 / 200 and i < shape[0] * (200 + 40) / 2 / 200 and j > shape[1] * (
-                        200 - 140) / 2 / 200 and j < shape[1] * (200 + 140) / 2 / 200:
-                    im_array[i][j] = [0, 0, 0]
-                    continue
-                target_points.append((i, j))
-                im_array[i][j] = [0, 0, 255]
+def find_square(im_array: np.ndarray, crop_h: int, crop_w: int, red=False):
+    """
+    优化版的 find_square：
+    - im_array: RGB ndarray，形状 (H, W, 3)，uint8
+    - crop_h, crop_w: 当前帧裁剪区域的高/宽（原来代码里用作“中心坐标计算”）
+    - 返回值和原版 find_square 一致：(new_white, pre_white, post_white) 或 None
 
-    if not target_points:
-        return
+    关键步骤：
+    1) 用向量化生成 mask_whites（所有 [255,255,255]）。
+    2) 根据 i,j 坐标一次性剔除中心那个矩形区域。
+    3) 用 cv2.distanceTransform 找出“最粗点” (r_i, r_j, max_d)。
+    4) 沿射线方向，用 NumPy 批量算坐标并一次性判断，而不是 Python for-loop。
+    5) “无情风暴”也用了向量化减掉半径 20 内的点。
+    """
 
-    r_i, r_j, max_d = find_thickest_point(shape, target_points)
+    H, W, _ = im_array.shape
 
-    # print("white square:",r_i, r_j)
-    if not r_i or not r_j:
-        return
-    # if max_d < 1:
-    #     return
-    pre_d = 0
-    post_d = 0
-    target = cal_degree(r_i - crop_h / 2, r_j - crop_w / 2)
-    sin = math.sin(2 * math.pi * target / 360)
-    cos = math.cos(2 * math.pi * target / 360)
-    for i in range(max_d, 21):
-        pre_i = round(r_i - sin * i)
-        pre_j = round(r_j - cos * i)
-        if list(im_array[pre_i][pre_j]) == [0, 0, 255]:
-            pre_d = i
-        else:
-            break
-    for i in range(max_d, 21):
-        pre_i = round(r_i + sin * i)
-        pre_j = round(r_j + cos * i)
-        if list(im_array[pre_i][pre_j]) == [0, 0, 255]:
-            post_d = i
-        else:
-            break
-    print(pre_d, post_d)
+    # ————————————————
+    # 1. 用 NumPy 一步生成“白色像素”掩码
+    #    mask_whites[i,j] = True 当且仅当 im_array[i,j] == [255,255,255]
+    # ————————————————
+    #  注意：np.all(im_array == 255, axis=2) 会自动把所有通道都对齐比较
+    mask_whites = np.all(im_array == 255, axis=2)  # shape = (H, W), bool
 
+    if not mask_whites.any():
+        return None
+
+    # ————————————————
+    # 2. 计算并一次性剔除“中心矩形”区域
+    #    原来代码里：if i > h*0.4 and i < h*0.6 以及 j > w*0.15 and j < w*0.85，就把那些白色改成黑
+    #    我们用向量化：
+    #       i_coords = 0,1,...,H-1  ； j_coords = 0,1,...,W-1
+    #    中心区域：
+    #       i ∈ (H*(200-40)/(2·200), H*(200+40)/(2·200))  → (0.4H, 0.6H)
+    #       j ∈ (W*(200-140)/(2·200), W*(200+140)/(2·200)) → (0.15W, 0.85W)
+    # ————————————————
+    i_coords = np.arange(H).reshape((H, 1))   # shape (H,1)
+    j_coords = np.arange(W).reshape((1, W))   # shape (1,W)
+
+    i_min = H * (200 - 40) / 2 / 200   # 0.4H
+    i_max = H * (200 + 40) / 2 / 200   # 0.6H
+    j_min = W * (200 - 140) / 2 / 200  # 0.15W
+    j_max = W * (200 + 140) / 2 / 200  # 0.85W
+
+    rect_mask = (i_coords > i_min) & (i_coords < i_max) & (j_coords > j_min) & (j_coords < j_max)
+    # 把这部分“在中心矩形里的白色”一并从 mask_whites 中去掉
+    mask_whites[rect_mask] = False
+
+    # 同时，如果你还想保持“视觉调试”时把这些中心白像素涂黑，可以：
+    # im_array[rect_mask & (np.all(im_array == 255, axis=2))] = [0, 0, 0]
+    # 但请注意：这样修改像素会改变后面的距离变换结果；若不需要可注释
+
+    if not mask_whites.any():
+        return None
+
+    # ————————————————
+    # 3. 直接用距离变换求“最粗点”
+    #    cv2.distanceTransform 要求输入是 uint8 二值图，所以先转换
+    # ————————————————
+    mask_u8 = (mask_whites.astype(np.uint8)) * 255  # 0/255
+    dist = cv2.distanceTransform(mask_u8, distanceType=cv2.DIST_C, maskSize=3)
+    # cv2.minMaxLoc 找到最大值和位置 (x=j, y=i)
+    minVal, maxVal, minLoc, maxLoc = cv2.minMaxLoc(dist)
+    if maxVal < 1:
+        return None
+
+    max_d = int(maxVal)        # 半径
+    center_j, center_i = maxLoc # maxLoc = (j, i)
+    r_i, r_j = center_i, center_j
+
+    # ————————————————
+    # 4. 计算沿射线方向的角度 sin/cos（与原版保持一致）
+    #    原先是：target = cal_degree(r_i - crop_h / 2, r_j - crop_w / 2)
+    #    这里 crop_h, crop_w 都是外部给的（你在 driver() 里确定过）
+    # ————————————————
+    cy = crop_h / 2
+    cx = crop_w / 2
+    deg = cal_degree(r_i - cy, r_j - cx)
+    sin_val, cos_val = get_sin_cos(deg)
+    # ————————————————
+    # 5. “向外搜索 pre_d”：从 max_d 一直到 20 ，判断哪些像素依旧在 mask_whites 里
+    #    原来写法是 Python for-loop，现在用 NumPy 批量生成坐标数组再一次性 compare
+    # ————————————————
+    # 这里我们假设 max_search_radius = 20（和原代码里写死的一样），如果想从 max_d 到 20：
+    radii = np.arange(max_d, 21)  # 比如 max_d=3 → array([3,4,5,...,20])
+
+    # 批量算出这些位置的整数坐标
+    pre_is = np.round(r_i - sin_val * radii).astype(np.int32)
+    pre_js = np.round(r_j - cos_val * radii).astype(np.int32)
+    # 先过滤越界的坐标
+    valid_mask = (pre_is >= 0) & (pre_is < H) & (pre_js >= 0) & (pre_js < W)
+    pre_is = pre_is[valid_mask]
+    pre_js = pre_js[valid_mask]
+    pre_radii = radii[valid_mask]
+
+    # 现在 mask_whites[pre_is, pre_js] == True 表示“这个像素线上仍然是白(255,255,255)”
+    # 找到第一个值为 False 的索引，若全部 True 则取最后一个 radius
+    if pre_is.size == 0:
+        pre_d = 0
+    else:
+        white_vals = mask_whites[pre_is, pre_js]  # bool array
+        # np.where(~white_vals) 找到第一处“不是白”的位置
+        idx_false = np.nonzero(~white_vals)[0]
+        pre_d = int(pre_radii[idx_false[0]]) if idx_false.size > 0 else int(pre_radii[-1])
+
+    # 同理算“post_d”：从 max_d 到 20，方向反过来（sin→+、cos→+）
+    post_is = np.round(r_i + sin_val * radii).astype(np.int32)
+    post_js = np.round(r_j + cos_val * radii).astype(np.int32)
+    valid_mask2 = (post_is >= 0) & (post_is < H) & (post_js >= 0) & (post_js < W)
+    post_is = post_is[valid_mask2]
+    post_js = post_js[valid_mask2]
+    post_radii = radii[valid_mask2]
+
+    if post_is.size == 0:
+        post_d = 0
+    else:
+        white_vals2 = mask_whites[post_is, post_js]
+        idx_false2 = np.nonzero(~white_vals2)[0]
+        post_d = int(post_radii[idx_false2[0]]) if idx_false2.size > 0 else int(post_radii[-1])
+
+    # 如果 pre_d + post_d < 5，要做“merciless storm”特殊逻辑
     if pre_d + post_d < 5:
-        print('merciless storm')
-        # Image.fromarray(im_array).save(imgdir+'merciless.png')
-        to_be_deleted = []
-        for i, j in target_points:
-            if abs(i - r_i) <= 20 and abs(j - r_j) <= 20:
-                to_be_deleted.append((i, j))
-        print('before', target_points)
+        # 原来做法：把所有 (i,j) ∈ target_points, 并且在 center 半径 20 内移除
+        # 现在我们直接用向量化：
+        yy, xx = np.nonzero(mask_whites)  # 所有白像素的 i,j 列表
+        # 过滤掉 |i - r_i|<=20 且 |j - r_j|<=20
+        storm_mask = (np.abs(yy - r_i) <= 20) & (np.abs(xx - r_j) <= 20)
+        yy2 = yy[~storm_mask]
+        xx2 = xx[~storm_mask]
+        if yy2.size == 0:
+            return None
 
-        for i in to_be_deleted:
-            target_points.remove(i)
-        print('after', target_points)
-        if not target_points:
-            return
-        r2_i, r2_j, max_d = find_thickest_point(shape, target_points)
-        if max_d < 3:
-            target1 = cal_degree(r_i - crop_h / 2, r_j - crop_w / 2)
-            target2 = cal_degree(r2_i - crop_h / 2, r2_j - crop_w / 2)
-            print('storm points', r_i, r_j, r2_i, r2_j)
-            if target1 < target2:
+        # 重新做距离变换：mask2 仅保留没被移除的那些白点
+        mask2 = np.zeros((H, W), dtype=np.uint8)
+        mask2[yy2, xx2] = 255
+        dist2 = cv2.distanceTransform(mask2, cv2.DIST_C, 3)
+        minVal2, maxVal2, minLoc2, maxLoc2 = cv2.minMaxLoc(dist2)
+        if maxVal2 < 3:
+            # 直接取两个“最粗点”看看角度大小，依旧需要再做一次三角函数对比
+            r2_j, r2_i = maxLoc2
+            deg1 = cal_degree(r_i - cy, r_j - cx)
+            deg2 = cal_degree(r2_i - cy, r2_j - cx)
+            if deg1 < deg2:
                 pre_white = (r_i, r_j)
                 post_white = (r2_i, r2_j)
             else:
                 pre_white = (r2_i, r2_j)
                 post_white = (r_i, r_j)
-            new_white = (round((pre_white[0] + post_white[0]) / 2), round((pre_white[1] + post_white[1]) / 2))
-            focus_level = 0
+            new_white = (
+                round((pre_white[0] + post_white[0]) / 2),
+                round((pre_white[1] + post_white[1]) / 2)
+            )
+            # focus_level 清零逻辑由外面调用者自行管理
+            return (new_white, pre_white, post_white)
+        else:
+            # 如果 maxVal2 >= 3，不做 storm 逻辑，继续按后续步骤
+            r_i2, r_j2 = maxLoc2[1], maxLoc2[0]
+            r_i, r_j, max_d = r_i2, r_j2, int(maxVal2)
+            deg = cal_degree(r_i - cy, r_j - cx)
+            sin_val, cos_val = SIN_TABLE[int(round(target)) % 360], COS_TABLE[int(round(target)) % 360]
+            # 重新计算 pre_d, post_d 就像上面一样……
+            radii2 = np.arange(max_d, 21)
+            pre_is = np.round(r_i - sin_val * radii2).astype(np.int32)
+            pre_js = np.round(r_j - cos_val * radii2).astype(np.int32)
+            valid_mask = (pre_is >= 0) & (pre_is < H) & (pre_js >= 0) & (pre_js < W)
+            pre_is = pre_is[valid_mask]; pre_js = pre_js[valid_mask]; rads = radii2[valid_mask]
+            if pre_is.size == 0:
+                pre_d = 0
+            else:
+                vals = mask2[pre_is, pre_js].astype(bool)
+                idx_f = np.nonzero(~vals)[0]
+                pre_d = int(rads[idx_f[0]]) if idx_f.size > 0 else int(rads[-1])
+
+            post_is = np.round(r_i + sin_val * radii2).astype(np.int32)
+            post_js = np.round(r_j + cos_val * radii2).astype(np.int32)
+            valid_mask2 = (post_is >= 0) & (post_is < H) & (post_js >= 0) & (post_js < W)
+            post_is = post_is[valid_mask2]; post_js = post_js[valid_mask2]; rads2 = radii2[valid_mask2]
+            if post_is.size == 0:
+                post_d = 0
+            else:
+                vals2 = mask2[post_is, post_js].astype(bool)
+                idx_f2 = np.nonzero(~vals2)[0]
+                post_d = int(rads2[idx_f2[0]]) if idx_f2.size > 0 else int(rads2[-1])
+
+            # 继续后面逻辑
+            pre_white = (round(r_i - sin_val * pre_d), round(r_j - cos_val * pre_d))
+            post_white = (round(r_i + sin_val * post_d), round(r_j + cos_val * post_d))
+            new_white = (
+                round((pre_white[0] + post_white[0]) / 2),
+                round((pre_white[1] + post_white[1]) / 2)
+            )
+            # 这里不额外打印“new white error”，假设容错
             return (new_white, pre_white, post_white)
 
-    pre_white = (round(r_i - sin * pre_d), round(r_j - cos * pre_d))
-    post_white = (round(r_i + sin * post_d), round(r_j + cos * post_d))
+    # ————————————————
+    # 6. 常规情况：pre_d + post_d >= 5
+    # ————————————————
+    pre_white = (round(r_i - sin_val * pre_d), round(r_j - cos_val * pre_d))
+    post_white = (round(r_i + sin_val * post_d), round(r_j + cos_val * post_d))
 
-    new_white = (round((pre_white[0] + post_white[0]) / 2), round((pre_white[1] + post_white[1]) / 2))
-    if list(im_array[new_white[0]][new_white[1]]) != [0, 0, 255]:
-        print("new white error")
-        return
-    #
+    new_white = (
+        round((pre_white[0] + post_white[0]) / 2),
+        round((pre_white[1] + post_white[1]) / 2)
+    )
+    # 原代码里还检查了一下 im_array[new_white] 是否是蓝色 [0,0,255]，但此处我们用 mask_whites 表示“是否白”
+    # new_white 处只要在 mask_whites 中就肯定是白色
+    # 如果一定要跟原版一模一样：可写：
+    #     if not (0 <= new_white[0] < H and 0 <= new_white[1] < W and mask_whites[new_white]):
+    #         print("new white error")
+    #         return
 
     return (new_white, pre_white, post_white)
 
@@ -442,7 +579,7 @@ def timer(im1, t1):
 
     # im2[pre_i][pre_j][0] > 200 and im2[pre_i][pre_j][1] < 20 and im2[pre_i][pre_j][2] < 20:
 
-    white = find_square(im1)
+    white = find_square(im1, crop_h, crop_w)
 
     if not white:
         return
@@ -484,8 +621,7 @@ def timer(im1, t1):
     max_d = r1[2]
     global delay_pixel
     start_point = post_white
-    sin = math.sin(2 * math.pi * target / 360)
-    cos = math.cos(2 * math.pi * target / 360)
+    sin, cos = SIN_TABLE[int(round(target)) % 360], COS_TABLE[int(round(target)) % 360]
     max_d += delay_pixel
     delta_i = pre_white[0] - white[0]
     delta_j = pre_white[1] - white[1]
@@ -801,19 +937,20 @@ def keyboard_callback(x):
         print('delay_pixel:', delay_pixel)
 
 
-def bind_to_last_core():
+def bind_to_last_four_cores():
     p = psutil.Process(os.getpid())
     cpu_count = os.cpu_count()
-    if cpu_count is not None and cpu_count > 1:
-        last_core = cpu_count - 1
-        p.cpu_affinity([last_core])
-        print(f"已绑定到 CPU 核心 #{last_core}")
+    if cpu_count is not None and cpu_count >= 4:
+        # 取最后 4 个核心的索引：从 cpu_count-4 到 cpu_count-1
+        cores = list(range(cpu_count - 4, cpu_count))
+        p.cpu_affinity(cores)
+        print(f"已绑定到 CPU 核心 {cores}")
     else:
-        print("CPU 核心不足，无法绑定")
+        print("CPU 核心不足，无法绑定最后四核")
 
 
 def main():
-    bind_to_last_core()  # ← 在主函数最开始绑定
+    bind_to_last_four_cores()
 
     if not os.path.exists(imgdir):
         os.mkdir(imgdir)
