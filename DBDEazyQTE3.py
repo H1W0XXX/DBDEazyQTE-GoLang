@@ -117,9 +117,14 @@ SendInput.argtypes = (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int)
 SendInput.restype = wintypes.UINT
 
 
-SIN_TABLE = [math.sin(math.radians(d)) for d in range(360)]
-COS_TABLE = [math.cos(math.radians(d)) for d in range(360)]
+SIN_COS_TABLE: List[Tuple[float, float]] = [
+    (math.sin(math.radians(d)), math.cos(math.radians(d)))
+    for d in range(360)
+]
 
+def get_sin_cos(deg: float) -> Tuple[float, float]:
+    idx = int(round(deg)) % 360
+    return SIN_COS_TABLE[idx]
 def send_space():
     global use_win32
     if use_win32:
@@ -279,13 +284,7 @@ def find_thickest_point(shape, target_points):
     # 4) max_val 就是半径 d，坐标是 (i,j)
     return i, j, int(max_val)
 
-def get_sin_cos(deg: float):
-    """
-    如果 deg 不是整数，就四舍五入到最近的整数再查表，
-    也可以直接 int(deg) 取地板，精度差别通常很小。
-    """
-    idx = int(round(deg)) % 360
-    return SIN_TABLE[idx], COS_TABLE[idx]
+
 
 def find_square(im_array: np.ndarray, crop_h: int, crop_w: int, red=False):
     """
